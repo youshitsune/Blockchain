@@ -5,9 +5,12 @@ import (
 	"encoding/gob"
 	"fmt"
 	"log"
+	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/boltdb/bolt"
+	"github.com/labstack/echo/v4"
 )
 
 // For testing purposes it's set to 20, it should be at least 24
@@ -42,7 +45,7 @@ func (b *Block) Serialize() []byte {
 
 	err := encoder.Encode(b)
 	if err != nil {
-		fmt.Printf("Can not serialize this block, error: %v", err)
+		log.Printf("Can not serialize this block, error: %v", err)
 	}
 
 	return result.Bytes()
@@ -55,29 +58,17 @@ func Deserialize(data []byte) *Block {
 
 	err := decoder.Decode(&block)
 	if err != nil {
-		fmt.Printf("Can not deserialize this block, error: %v", err)
+		log.Printf("Can not deserialize this block, error: %v", err)
 	}
 
 	return &block
 }
 
-func (bc *Blockchain) AddBlock(data string) {
-	var lastHash []byte
+func (bc *Blockchain) AddBlock(data []byte) {
 
-	err := bc.DB.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte(blocksBucket))
-		lastHash = b.Get([]byte("l"))
+	newBlock := Deserialize(data)
 
-		return nil
-	})
-
-	if err != nil {
-		log.Fatalf("Could not open a database: %v", err)
-	}
-
-	newBlock := NewBlock(data, lastHash)
-
-	err = bc.DB.Update(func(tx *bolt.Tx) error {
+	err := bc.DB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(blocksBucket))
 		err := b.Put(newBlock.Hash, newBlock.Serialize())
 		if err != nil {
@@ -88,6 +79,10 @@ func (bc *Blockchain) AddBlock(data string) {
 
 		return nil
 	})
+	if err != nil {
+		log.Fatalf("Could not open a database: %v", err)
+	}
+
 }
 
 func (bc *Blockchain) Iterator() *BlockchainIterator {
@@ -174,6 +169,39 @@ func main() {
 	bc := NewBlockchain()
 	defer bc.DB.Close()
 
-	cli := CLI{bc}
-	cli.Run()
+	e := echo.New()
+
+	e.GET("/", func(c echo.Context) error {
+		var data string
+		bci := bc.Iterator()
+
+		for {
+			block := bci.Next()
+
+			data += fmt.Sprintf("Prev. hash: %x\n", block.PrevHash)
+			data += fmt.Sprintf("Data: %s\n", block.Data)
+			data += fmt.Sprintf("Hash: %x\n", block.Hash)
+
+			pow := NewPoW(block)
+			data += fmt.Sprintf("PoW: %s\n", strconv.FormatBool(pow.Validate()))
+			data += "\n"
+
+			if len(block.PrevHash) == 0 {
+				break
+			}
+		}
+		return c.String(http.StatusOK, data)
+	})
+
+	e.POST("/addblock", func(c echo.Context) error {
+		data := c.FormValue("data")
+		if data == "req" {
+			return c.String(http.StatusOK, fmt.Sprintf("%x", bc.Tip))
+		} else {
+			bc.AddBlock([]byte(data))
+			return c.String(http.StatusOK, "Block has been added")
+		}
+	})
+
+	e.Logger.Fatal(e.Start(":8080"))
 }
