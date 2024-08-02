@@ -3,15 +3,23 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/gob"
 	"fmt"
+	"log"
 	"math"
 	"math/big"
 	"strconv"
 	"time"
+
+	"github.com/boltdb/bolt"
 )
 
 // For testing purposes it's set to 20, it should be at least 24
-const targetBits = 20
+const (
+	targetBits   = 20
+	dbFile       = "db"
+	blocksBucket = "blockchain"
+)
 
 type PoW struct {
 	Block  *Block
@@ -27,21 +35,95 @@ type Block struct {
 }
 
 type Blockchain struct {
-	Blocks []*Block
+	Tip []byte
+	DB  *bolt.DB
 }
 
-func (b *Block) SetHash() {
-	timestamp := []byte(strconv.FormatInt(b.Timestamp, 10))
-	headers := bytes.Join([][]byte{b.PrevHash, b.Data, timestamp}, []byte{})
-	hash := sha256.Sum256(headers)
-
-	b.Hash = hash[:]
+type BlockchainIterator struct {
+	DB          *bolt.DB
+	CurrentHash []byte
 }
 
-func (b *Blockchain) AddBlock(data string) {
-	prevBlock := b.Blocks[len(b.Blocks)-1]
-	newBlock := NewBlock(data, prevBlock.Hash)
-	b.Blocks = append(b.Blocks, newBlock)
+func (b *Block) Serialize() []byte {
+	var result bytes.Buffer
+
+	encoder := gob.NewEncoder(&result)
+
+	err := encoder.Encode(b)
+	if err != nil {
+		fmt.Printf("Can not serialize this block, error: %v", err)
+	}
+
+	return result.Bytes()
+}
+
+func Deserialize(data []byte) *Block {
+	var block Block
+
+	decoder := gob.NewDecoder(bytes.NewReader(data))
+
+	err := decoder.Decode(&block)
+	if err != nil {
+		fmt.Printf("Can not deserialize this block, error: %v", err)
+	}
+
+	return &block
+}
+
+func (bc *Blockchain) AddBlock(data string) {
+	var lastHash []byte
+
+	err := bc.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		lastHash = b.Get([]byte("l"))
+
+		return nil
+	})
+
+	if err != nil {
+		log.Fatalf("Could not open a database: %v", err)
+	}
+
+	newBlock := NewBlock(data, lastHash)
+
+	err = bc.DB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		err := b.Put(newBlock.Hash, newBlock.Serialize())
+		if err != nil {
+			log.Fatalf("Could not put new block into database: %v", err)
+		}
+		err = b.Put([]byte("l"), newBlock.Hash)
+		bc.Tip = newBlock.Hash
+
+		return nil
+	})
+}
+
+func (bc *Blockchain) Iterator() *BlockchainIterator {
+	return &BlockchainIterator{
+		DB:          bc.DB,
+		CurrentHash: bc.Tip,
+	}
+}
+
+func (i *BlockchainIterator) Next() *Block {
+	var block *Block
+
+	err := i.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+		encodedBlock := b.Get(i.CurrentHash)
+		block = Deserialize(encodedBlock)
+
+		return nil
+	})
+
+	if err != nil {
+		log.Fatalf("Could not open a database: %v", err)
+	}
+
+	i.CurrentHash = block.PrevHash
+
+	return block
 }
 
 func (pow *PoW) PrepareData(nonce int) []byte {
@@ -123,14 +205,43 @@ func NewGenesisBlock() *Block {
 }
 
 func NewBlockchain() *Blockchain {
-	return &Blockchain{[]*Block{NewGenesisBlock()}}
+	var tip []byte
+	db, err := bolt.Open(dbFile, 0600, nil)
+	if err != nil {
+		log.Fatalf("Error while opening the database: %v", err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(blocksBucket))
+
+		if b == nil {
+			genesis := NewGenesisBlock()
+			b, err := tx.CreateBucket([]byte(blocksBucket))
+			if err != nil {
+				log.Fatalf("Error while creating a bucket: %v", err)
+			}
+			err = b.Put(genesis.Hash, genesis.Serialize())
+			err = b.Put([]byte("l"), genesis.Hash)
+			tip = genesis.Hash
+		} else {
+			tip = b.Get([]byte("l"))
+		}
+
+		return nil
+	})
+
+	b := Blockchain{
+		Tip: tip,
+		DB:  db,
+	}
+
+	return &b
 }
 
 func main() {
-	b := NewBlockchain()
+	bc := NewBlockchain()
+	defer bc.DB.Close()
 
-	b.AddBlock("Test")
-	for i := range b.Blocks {
-		fmt.Printf("%v: %x\n", i, b.Blocks[i].Hash)
-	}
+	cli := CLI{bc}
+	cli.Run()
 }
