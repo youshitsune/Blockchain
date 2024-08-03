@@ -1,13 +1,10 @@
 package main
 
 import (
-	"bytes"
-	"encoding/gob"
 	"fmt"
 	"log"
 	"net/http"
-	"strconv"
-	"time"
+	"strings"
 
 	"github.com/boltdb/bolt"
 	"github.com/labstack/echo/v4"
@@ -20,14 +17,6 @@ const (
 	blocksBucket = "blockchain"
 )
 
-type Block struct {
-	Data      []byte
-	PrevHash  []byte
-	Hash      []byte
-	Timestamp int64
-	Nonce     int
-}
-
 type Blockchain struct {
 	Tip []byte
 	DB  *bolt.DB
@@ -36,32 +25,6 @@ type Blockchain struct {
 type BlockchainIterator struct {
 	DB          *bolt.DB
 	CurrentHash []byte
-}
-
-func (b *Block) Serialize() []byte {
-	var result bytes.Buffer
-
-	encoder := gob.NewEncoder(&result)
-
-	err := encoder.Encode(b)
-	if err != nil {
-		log.Printf("Can not serialize this block, error: %v", err)
-	}
-
-	return result.Bytes()
-}
-
-func Deserialize(data []byte) *Block {
-	var block Block
-
-	decoder := gob.NewDecoder(bytes.NewReader(data))
-
-	err := decoder.Decode(&block)
-	if err != nil {
-		log.Printf("Can not deserialize this block, error: %v", err)
-	}
-
-	return &block
 }
 
 func (bc *Blockchain) AddBlock(data []byte) {
@@ -112,23 +75,8 @@ func (i *BlockchainIterator) Next() *Block {
 	return block
 }
 
-func NewBlock(data string, prevHash []byte) *Block {
-	block := &Block{
-		Timestamp: time.Now().Unix(),
-		Data:      []byte(data),
-		PrevHash:  prevHash,
-		Hash:      []byte{},
-	}
-	pow := NewPoW(block)
-	nonce, hash := pow.Run()
-
-	block.Hash = hash[:]
-	block.Nonce = nonce
-	return block
-}
-
 func NewGenesisBlock() *Block {
-	return NewBlock("Genesis Block", []byte{})
+	return NewBlock("Genesis Block", "", []byte{})
 }
 
 func NewBlockchain() *Blockchain {
@@ -172,25 +120,19 @@ func main() {
 	e := echo.New()
 
 	e.GET("/", func(c echo.Context) error {
-		var data string
+		var data []string
 		bci := bc.Iterator()
 
 		for {
 			block := bci.Next()
 
-			data += fmt.Sprintf("Prev. hash: %x\n", block.PrevHash)
-			data += fmt.Sprintf("Data: %s\n", block.Data)
-			data += fmt.Sprintf("Hash: %x\n", block.Hash)
-
-			pow := NewPoW(block)
-			data += fmt.Sprintf("PoW: %s\n", strconv.FormatBool(pow.Validate()))
-			data += "\n"
+			data = append(data, string(block.Serialize()))
 
 			if len(block.PrevHash) == 0 {
 				break
 			}
 		}
-		return c.String(http.StatusOK, data)
+		return c.String(http.StatusOK, strings.Join(data, "|/"))
 	})
 
 	e.POST("/addblock", func(c echo.Context) error {
@@ -201,6 +143,27 @@ func main() {
 			bc.AddBlock([]byte(data))
 			return c.String(http.StatusOK, "Block has been added")
 		}
+	})
+
+	e.POST("/getdata", func(c echo.Context) error {
+		var res []string
+		hash := c.FormValue("data")
+		bci := bc.Iterator()
+
+		for {
+			block := bci.Next()
+
+			if hash == fmt.Sprintf("%x", block.Hash) {
+				res = append(res, string(block.Data), string(block.Name))
+				return c.String(http.StatusOK, strings.Join(res, "|/"))
+			}
+
+			if len(block.PrevHash) == 0 {
+				break
+			}
+		}
+
+		return c.String(http.StatusOK, "That block does not exist")
 	})
 
 	e.Logger.Fatal(e.Start(":8080"))
