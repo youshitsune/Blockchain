@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"encoding/gob"
+	"encoding/json"
 	"log"
 	"time"
 )
@@ -19,7 +19,7 @@ type Block struct {
 func (b *Block) Serialize() []byte {
 	var result bytes.Buffer
 
-	encoder := gob.NewEncoder(&result)
+	encoder := json.NewEncoder(&result)
 
 	err := encoder.Encode(b)
 	if err != nil {
@@ -32,7 +32,7 @@ func (b *Block) Serialize() []byte {
 func Deserialize(data []byte) *Block {
 	var block Block
 
-	decoder := gob.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(bytes.NewReader(data))
 
 	err := decoder.Decode(&block)
 	if err != nil {
